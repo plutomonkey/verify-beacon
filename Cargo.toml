@@ -1,0 +1,13 @@
+[package]
+name = "verify-beacon"
+version = "0.1.0"
+authors = ["Jason Davies <jason@jasondavies.com>"]
+
+[dependencies]
+byteorder = "1"
+crunchy = "0.2"
+rust-crypto = "0.2"
+itertools = "0.7"
+hex = "0.3"
+rayon = "1"
+stdsimd = { git = "https://github.com/rust-lang-nursery/stdsimd.git" }
