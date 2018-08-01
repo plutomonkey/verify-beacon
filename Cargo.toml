@@ -10,4 +10,4 @@ rust-crypto = "0.2"
 itertools = "0.7"
 hex = "0.3"
 rayon = "1"
-stdsimd = { git = "https://github.com/rust-lang-nursery/stdsimd.git" }
+packed_simd = { version = "0.1", features = ["into_bits"] }

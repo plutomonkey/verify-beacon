@@ -1,27 +1,21 @@
-// Verifies the Powers of Tau beacon.
-// Usage: cat 1024.txt | verify_beacon
-//
-#![feature(cfg_target_feature, target_feature, stdsimd)]
-#![feature(target_feature)]
-#![feature(test)]
-
-extern crate byteorder;
-#[allow(unused_imports)]
-#[macro_use]
-extern crate crunchy;
-extern crate crypto;
+/// Parallel verification of a 2**42 SHA-256 random beacon.
+///
+/// Usage: `cargo run --release --bin verify < 1024.txt`
+///
+/// Input should be 1025 lines, i.e. 1024 overlapping pairs, each line being 256 bits, hex-encoded
+/// (64 hex characters).
 extern crate hex;
 extern crate itertools;
 extern crate rayon;
-extern crate stdsimd;
+extern crate verify_beacon;
 
 use itertools::Itertools;
 use rayon::prelude::*;
 use std::io::{self, BufRead};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-pub mod sha256;
+use verify_beacon::sha256;
 
 fn main() {
     let stdin = io::stdin();
@@ -36,7 +30,11 @@ fn main() {
     let remaining = Arc::new(AtomicUsize::new(count));
     pairs.par_iter().for_each(|(a, b)| {
         verify(&a, &b, iterations);
-        println!("remaining={}/{}", remaining.fetch_sub(1, Ordering::Relaxed) - 1, count);
+        println!(
+            "remaining={}/{}",
+            remaining.fetch_sub(1, Ordering::Relaxed) - 1,
+            count
+        );
     });
 }
 

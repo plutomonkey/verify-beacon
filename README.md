@@ -11,12 +11,15 @@ non-accelerated fallback.
 
 The `verify-beacon` binary will panic if any of the pairs are invalid.
 
+*Important:* binaries _must_ be compiled with `RUSTFLAGS='-C
+target-cpu=native'` to enable hardware-acceleration.
+
 # Intel SHA Extensions
 
 For example, this should work on AMD Ryzen CPUs:
 
 ```sh
-RUSTFLAGS='-C target-cpu=native' cargo run --release --bin verify-beacon < 1024.txt
+RUSTFLAGS='-C target-cpu=native' cargo run --release --bin verify < 1024.txt
 ```
 
 The time taken is around 130 cycles per iteration, which is ~1h45m on 24 Ryzen
@@ -25,7 +28,7 @@ cores running at 3.8GHz.
 # ARM NEON
 
 ```sh
-RUSTFLAGS='-C target-feature=+crypto,+neon' cargo run --release --bin verify-beacon < 1024.txt
+RUSTFLAGS='-C target-cpu=native' cargo run --release --bin verify < 1024.txt
 ```
 
 The time taken is a bit over double the number of cycles compared with Ryzen,

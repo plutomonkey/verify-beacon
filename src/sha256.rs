@@ -1,5 +1,14 @@
 use byteorder::{BigEndian, ByteOrder};
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+#[cfg(target_arch = "x86")]
+use std::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+use packed_simd::*;
+
 #[allow(dead_code)]
 const H: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -17,172 +26,163 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
+unsafe fn iterated_sha256_x86(input: &[u8], iterations: usize) -> [u8; 32] {
     let mut digest = [0u8; 32];
 
-    #[cfg(
-        all(
-            any(target_arch = "x86", target_arch = "x86_64"),
-            target_feature = "sha",
-            target_feature = "sse2",
-            target_feature = "ssse3",
-            target_feature = "sse4.1"
-        )
-    )]
-    {
-        #[cfg(target_arch = "x86")]
-        use stdsimd::arch::x86::*;
-        #[cfg(target_arch = "x86_64")]
-        use stdsimd::arch::x86_64::*;
-        use stdsimd::simd::*;
+    let mut data = [0u32; 16];
+    BigEndian::read_u32_into(input, &mut data[..8]);
+    data[8] = 0x8000_0000;
+    data[15] = 0x100;
 
-        let mut data = [0u32; 16];
-        BigEndian::read_u32_into(input, &mut data[..8]);
-        data[8] = 0x8000_0000;
-        data[15] = 0x100;
+    let mut msg = [
+        u32x4::new(data[0], data[1], data[2], data[3]).into_bits(),
+        u32x4::new(data[4], data[5], data[6], data[7]).into_bits(),
+        u32x4::new(data[8], data[9], data[10], data[11]).into_bits(),
+        u32x4::new(data[12], data[13], data[14], data[15]).into_bits(),
+    ];
 
-        let mut msg = [
-            u32x4::new(data[0], data[1], data[2], data[3]).into_bits(),
-            u32x4::new(data[4], data[5], data[6], data[7]).into_bits(),
-            u32x4::new(data[8], data[9], data[10], data[11]).into_bits(),
-            u32x4::new(data[12], data[13], data[14], data[15]).into_bits(),
-        ];
+    let tmp = u32x4::new(H[0], H[1], H[2], H[3]).into_bits();
+    let state1 = u32x4::new(H[4], H[5], H[6], H[7]).into_bits();
 
-        let tmp = u32x4::new(H[0], H[1], H[2], H[3]).into_bits();
-        let state1 = u32x4::new(H[4], H[5], H[6], H[7]).into_bits();
+    let tmp = _mm_shuffle_epi32(tmp, 0xb1);
+    let state1 = _mm_shuffle_epi32(state1, 0x1b);
+    let state0 = _mm_alignr_epi8(tmp, state1, 8);
+    let state1 = _mm_blend_epi16(state1, tmp, 0xf0);
 
-        let tmp = _mm_shuffle_epi32(tmp, 0xb1);
-        let state1 = _mm_shuffle_epi32(state1, 0x1b);
-        let state0 = _mm_alignr_epi8(tmp, state1, 8);
-        let state1 = _mm_blend_epi16(state1, tmp, 0xf0);
+    let abef_save = state0;
+    let cdgh_save = state1;
+    let msg2_save = msg[2];
+    let msg3_save = msg[3];
 
-        let abef_save = state0;
-        let cdgh_save = state1;
-        let msg2_save = msg[2];
-        let msg3_save = msg[3];
+    for _ in 0..iterations {
+        let mut state0 = abef_save;
+        let mut state1 = cdgh_save;
 
-        for _ in 0..iterations {
-            let mut state0 = abef_save;
-            let mut state1 = cdgh_save;
+        msg[2] = msg2_save;
+        msg[3] = msg3_save;
 
-            msg[2] = msg2_save;
-            msg[3] = msg3_save;
-
-            unroll! {
-                for i in 0..16 {
-                    let m = i % 4;
-                    let m_next = (i + 1) % 4;
-                    let m_prev = (i + 3) % 4;
-                    {
-                        let tmp = _mm_add_epi32(msg[m], i32x4::new(K[i*4] as i32, K[i*4+1] as i32, K[i*4+2] as i32, K[i*4+3] as i32).into_bits());
-                        state1 = _mm_sha256rnds2_epu32(state1, state0, tmp);
-                        state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32(tmp, 0x0e));
-                    }
-                    if i > 2 {
-                        let tmp = _mm_alignr_epi8(msg[m], msg[m_prev], 4);
-                        msg[m_next] = _mm_add_epi32(msg[m_next], tmp);
-                        msg[m_next] = _mm_sha256msg2_epu32(msg[m_next], msg[m]);
-                    }
-                    if i > 0 {
-                        msg[m_prev] = _mm_sha256msg1_epu32(msg[m_prev], msg[m]);
-                    }
+        unroll! {
+            for i in 0..16 {
+                let m = i % 4;
+                let m_next = (i + 1) % 4;
+                let m_prev = (i + 3) % 4;
+                {
+                    let tmp = _mm_add_epi32(msg[m], i32x4::new(K[i*4] as i32, K[i*4+1] as i32, K[i*4+2] as i32, K[i*4+3] as i32).into_bits());
+                    state1 = _mm_sha256rnds2_epu32(state1, state0, tmp);
+                    state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32(tmp, 0x0e));
                 }
-            }
-
-            state0 = _mm_add_epi32(state0, abef_save);
-            state1 = _mm_add_epi32(state1, cdgh_save);
-
-            {
-                let tmp = _mm_shuffle_epi32(state0, 0x1b);
-                state1 = _mm_shuffle_epi32(state1, 0xb1);
-                msg[0] = _mm_blend_epi16(tmp, state1, 0xf0);
-                msg[1] = _mm_alignr_epi8(state1, tmp, 8);
+                if i > 2 {
+                    let tmp = _mm_alignr_epi8(msg[m], msg[m_prev], 4);
+                    msg[m_next] = _mm_add_epi32(msg[m_next], tmp);
+                    msg[m_next] = _mm_sha256msg2_epu32(msg[m_next], msg[m]);
+                }
+                if i > 0 {
+                    msg[m_prev] = _mm_sha256msg1_epu32(msg[m_prev], msg[m]);
+                }
             }
         }
 
-        let msg0: u32x4 = msg[0].into_bits();
-        let msg1: u32x4 = msg[1].into_bits();
+        state0 = _mm_add_epi32(state0, abef_save);
+        state1 = _mm_add_epi32(state1, cdgh_save);
 
-        let mut words = [0u32; 8];
-        msg0.store_unaligned(&mut words[..4]);
-        msg1.store_unaligned(&mut words[4..]);
-
-        BigEndian::write_u32_into(&words, &mut digest);
+        {
+            let tmp = _mm_shuffle_epi32(state0, 0x1b);
+            state1 = _mm_shuffle_epi32(state1, 0xb1);
+            msg[0] = _mm_blend_epi16(tmp, state1, 0xf0);
+            msg[1] = _mm_alignr_epi8(state1, tmp, 8);
+        }
     }
 
-    #[cfg(all(target_arch = "aarch64", target_feature = "crypto", target_feature = "neon"))]
-    {
-        use stdsimd::arch::aarch64::*;
-        use stdsimd::simd::*;
+    let msg0: u32x4 = msg[0].into_bits();
+    let msg1: u32x4 = msg[1].into_bits();
 
-        let mut data = [0u32; 16];
-        BigEndian::read_u32_into(input, &mut data[..8]);
-        data[8] = 0x8000_0000;
-        data[15] = 0x100;
+    let mut words = [0u32; 8];
+    msg0.write_to_slice_unaligned(&mut words[..4]);
+    msg1.write_to_slice_unaligned(&mut words[4..]);
 
-        let mut msg = [
-            u32x4::new(data[0], data[1], data[2], data[3]).into_bits(),
-            u32x4::new(data[4], data[5], data[6], data[7]).into_bits(),
-            u32x4::new(data[8], data[9], data[10], data[11]).into_bits(),
-            u32x4::new(data[12], data[13], data[14], data[15]).into_bits(),
-        ];
+    BigEndian::write_u32_into(&words, &mut digest);
 
-        let state0 = u32x4::new(H[0], H[1], H[2], H[3]).into_bits();
-        let state1 = u32x4::new(H[4], H[5], H[6], H[7]).into_bits();
+    digest
+}
 
-        let abef_save = state0;
-        let cdgh_save = state1;
-        let msg2_save = msg[2];
-        let msg3_save = msg[3];
+#[cfg(target_arch = "aarch64")]
+unsafe fn iterated_sha256_aarch64(input: &[u8], iterations: usize) -> [u8; 32] {
+    let mut digest = [0u8; 32];
 
-        for _ in 0..iterations {
-            let mut state0 = abef_save;
-            let mut state1 = cdgh_save;
+    let mut data = [0u32; 16];
+    BigEndian::read_u32_into(input, &mut data[..8]);
+    data[8] = 0x8000_0000;
+    data[15] = 0x100;
 
-            msg[2] = msg2_save;
-            msg[3] = msg3_save;
+    let mut msg = [
+        u32x4::new(data[0], data[1], data[2], data[3]).into_bits(),
+        u32x4::new(data[4], data[5], data[6], data[7]).into_bits(),
+        u32x4::new(data[8], data[9], data[10], data[11]).into_bits(),
+        u32x4::new(data[12], data[13], data[14], data[15]).into_bits(),
+    ];
 
-            unroll! {
-                for i in 0..16 {
-                    let m = i % 4;
-                    let m_next = (i + 1) % 4;
-                    let tmp = vaddq_u32(msg[m], u32x4::new(K[i*4], K[i*4+1], K[i*4+2], K[i*4+3]).into_bits());
-                    msg[m] = vsha256su0q_u32(msg[m], msg[m_next]);
-                    let old_state0 = state0;
-                    state0 = vsha256hq_u32(state0, state1, tmp);
-                    state1 = vsha256h2q_u32(state1, old_state0, tmp);
-                    msg[m] = vsha256su1q_u32(msg[m], msg[(i + 2) % 4], msg[(i + 3) % 4]);
-                }
+    let state0 = u32x4::new(H[0], H[1], H[2], H[3]).into_bits();
+    let state1 = u32x4::new(H[4], H[5], H[6], H[7]).into_bits();
+
+    let abef_save = state0;
+    let cdgh_save = state1;
+    let msg2_save = msg[2];
+    let msg3_save = msg[3];
+
+    for _ in 0..iterations {
+        let mut state0 = abef_save;
+        let mut state1 = cdgh_save;
+
+        msg[2] = msg2_save;
+        msg[3] = msg3_save;
+
+        unroll! {
+            for i in 0..16 {
+                let m = i % 4;
+                let m_next = (i + 1) % 4;
+                let tmp = vaddq_u32(msg[m], u32x4::new(K[i*4], K[i*4+1], K[i*4+2], K[i*4+3]).into_bits());
+                msg[m] = vsha256su0q_u32(msg[m], msg[m_next]);
+                let old_state0 = state0;
+                state0 = vsha256hq_u32(state0, state1, tmp);
+                state1 = vsha256h2q_u32(state1, old_state0, tmp);
+                msg[m] = vsha256su1q_u32(msg[m], msg[(i + 2) % 4], msg[(i + 3) % 4]);
             }
-
-            msg[0] = vaddq_u32(state0, abef_save);
-            msg[1] = vaddq_u32(state1, cdgh_save);
         }
 
-        let msg0: u32x4 = msg[0].into_bits();
-        let msg1: u32x4 = msg[1].into_bits();
-
-        let mut words = [0u32; 8];
-        msg0.store_unaligned(&mut words[..4]);
-        msg1.store_unaligned(&mut words[4..]);
-
-        BigEndian::write_u32_into(&words, &mut digest);
+        msg[0] = vaddq_u32(state0, abef_save);
+        msg[1] = vaddq_u32(state1, cdgh_save);
     }
 
-    #[cfg(
-        not(
-            any(
-                all(
-                    any(target_arch = "x86", target_arch = "x86_64"),
-                    target_feature = "sha",
-                    target_feature = "sse2",
-                    target_feature = "ssse3",
-                    target_feature = "sse4.1"
-                ),
-                all(target_arch = "aarch64", target_feature = "crypto", target_feature = "neon")
-            )
-        )
-    )]
+    let msg0: u32x4 = msg[0].into_bits();
+    let msg1: u32x4 = msg[1].into_bits();
+
+    let mut words = [0u32; 8];
+    msg0.store_unaligned(&mut words[..4]);
+    msg1.store_unaligned(&mut words[4..]);
+
+    BigEndian::write_u32_into(&words, &mut digest);
+    digest
+}
+
+pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("sha")
+            && is_x86_feature_detected!("sse2")
+            && is_x86_feature_detected!("ssse3")
+            && is_x86_feature_detected!("sse4.1")
+        {
+            return iterated_sha256_x86(input, iterations);
+        }
+    }
+
+    #[cfg(all(target_arch = "aarch64"))]
+    {
+        if is_aarch64_feature_detected("crypto") && is_aarch64_feature_detected("neon") {
+            return iterated_sha256_aarch64(input, iterations);
+        }
+    }
+
     {
         use crypto::sha2::sha256_digest_block;
 
@@ -196,10 +196,10 @@ pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
             sha256_digest_block(&mut state, &data);
             BigEndian::write_u32_into(&state, &mut data[..32]);
         }
+        let mut digest = [0u8; 32];
         digest.copy_from_slice(&data[..32]);
+        digest
     }
-
-    digest
 }
 
 #[cfg(test)]
@@ -213,9 +213,10 @@ mod tests {
     #[test]
     fn test_iterated_sha256() {
         let mut buffer = [0u8; 32];
-        buffer.copy_from_slice(&hex::decode(
-            "00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58",
-        ).unwrap());
+        buffer.copy_from_slice(
+            &hex::decode("00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58")
+                .unwrap(),
+        );
         unsafe {
             let one_iteration = iterated_sha256(&buffer, 1);
             assert_eq!(
@@ -233,9 +234,10 @@ mod tests {
     #[bench]
     fn bench_iterated_sha256(b: &mut Bencher) {
         let mut buffer = [0u8; 32];
-        buffer.copy_from_slice(&hex::decode(
-            "00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58",
-        ).unwrap());
+        buffer.copy_from_slice(
+            &hex::decode("00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58")
+                .unwrap(),
+        );
         unsafe {
             b.iter(|| iterated_sha256(&buffer, 1 << 12));
         }
