@@ -26,6 +26,7 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 unsafe fn iterated_sha256_x86(input: &[u8], iterations: usize) -> [u8; 32] {
     let mut digest = [0u8; 32];
 
@@ -157,8 +158,8 @@ unsafe fn iterated_sha256_aarch64(input: &[u8], iterations: usize) -> [u8; 32] {
     let msg1: u32x4 = msg[1].into_bits();
 
     let mut words = [0u32; 8];
-    msg0.store_unaligned(&mut words[..4]);
-    msg1.store_unaligned(&mut words[4..]);
+    msg0.write_to_slice_unaligned(&mut words[..4]);
+    msg1.write_to_slice_unaligned(&mut words[4..]);
 
     BigEndian::write_u32_into(&words, &mut digest);
     digest
@@ -178,7 +179,7 @@ pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
 
     #[cfg(all(target_arch = "aarch64"))]
     {
-        if is_aarch64_feature_detected("crypto") && is_aarch64_feature_detected("neon") {
+        if is_aarch64_feature_detected!("crypto") && is_aarch64_feature_detected!("neon") {
             return iterated_sha256_aarch64(input, iterations);
         }
     }
