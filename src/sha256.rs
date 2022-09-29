@@ -185,16 +185,20 @@ pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
     }
 
     {
-        use crypto::sha2::sha256_digest_block;
+        use core::slice;
+        use sha2::{
+            compress256,
+            digest::generic_array::{typenum::U64, GenericArray},
+        };
 
-        let mut data = [0u8; 64];
+        let mut data: GenericArray<u8, U64> = GenericArray::default();
         data[..32].copy_from_slice(input);
         data[32] = 0x80;
         data[62] = 0x01;
 
         for _ in 0..iterations {
             let mut state = H;
-            sha256_digest_block(&mut state, &data);
+            compress256(&mut state, slice::from_ref(&data));
             BigEndian::write_u32_into(&state, &mut data[..32]);
         }
         let mut digest = [0u8; 32];
