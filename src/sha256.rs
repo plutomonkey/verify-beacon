@@ -179,6 +179,7 @@ pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
 
     #[cfg(all(target_arch = "aarch64"))]
     {
+        use std::arch::is_aarch64_feature_detected;
         if is_aarch64_feature_detected!("sha2") && is_aarch64_feature_detected!("neon") {
             return iterated_sha256_aarch64(input, iterations);
         }
