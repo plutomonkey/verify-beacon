@@ -3,6 +3,8 @@ name = "verify-beacon"
 version = "0.1.2"
 edition = "2021"
 authors = ["Jason Davies <jason@jasondavies.com>"]
+description = "Computes and verifies an iterated SHA-256 randomness beacon using hardware acceleration if available."
+license = "MIT"
 
 [dependencies]
 byteorder = "1"
