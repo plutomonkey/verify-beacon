@@ -17,9 +17,6 @@ Ryzen) and ARMv8 cryptographic extensions are supported.
 Usage
 -----
 
-*Important:* binaries _must_ be compiled with `RUSTFLAGS='-C
-target-cpu=native'` to enable hardware-acceleration.
-
 * `cargo run --release --bin compute > pairs.txt`
 * `cargo run --release --bin verify < pairs.txt`
 
