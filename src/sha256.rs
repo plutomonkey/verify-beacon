@@ -1,5 +1,3 @@
-use byteorder::{BigEndian, ByteOrder};
-
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 #[cfg(target_arch = "x86")]
@@ -7,9 +5,9 @@ use std::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use std::simd::u32x4;
+#[allow(unused_imports)]
+use crunchy::unroll;
 
-#[allow(dead_code)]
 const H: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
@@ -26,19 +24,57 @@ const K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
+/// Reads a 256-bit input as eight big-endian words, followed by the SHA-256 padding for a 256-bit
+/// message.
+#[allow(dead_code)]
+fn load_block(input: &[u8]) -> [u32; 16] {
+    assert_eq!(input.len(), 32);
+    let mut data = [0u32; 16];
+    for (word, bytes) in data.iter_mut().zip(input.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
+    }
+    data[8] = 0x8000_0000;
+    data[15] = 0x100;
+    data
+}
+
+fn store_digest(words: &[u32; 8]) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (bytes, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *bytes = word.to_be_bytes();
+    }
+    digest
+}
+
+/// Packs four words into a vector with `a` in lane 0, matching the word order used by the SHA
+/// extensions.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-unsafe fn to_m128i(a: u32, b: u32, c: u32, d: u32) -> __m128i {
-    _mm_set_epi32(a as i32, b as i32, c as i32, d as i32)
+#[inline]
+#[target_feature(enable = "sse2")]
+fn to_m128i(a: u32, b: u32, c: u32, d: u32) -> __m128i {
+    _mm_setr_epi32(a as i32, b as i32, c as i32, d as i32)
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-unsafe fn iterated_sha256_x86(input: &[u8], iterations: usize) -> [u8; 32] {
-    let mut digest = [0u8; 32];
+fn has_x86_sha() -> bool {
+    is_x86_feature_detected!("sha")
+        && is_x86_feature_detected!("sse2")
+        && is_x86_feature_detected!("ssse3")
+        && is_x86_feature_detected!("sse4.1")
+}
 
-    let mut data = [0u32; 16];
-    BigEndian::read_u32_into(input, &mut data[..8]);
-    data[8] = 0x8000_0000;
-    data[15] = 0x100;
+#[cfg(target_arch = "aarch64")]
+fn has_aarch64_sha() -> bool {
+    use std::arch::is_aarch64_feature_detected;
+    is_aarch64_feature_detected!("sha2") && is_aarch64_feature_detected!("neon")
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+// `unroll!` substitutes a constant for `i`, so comparisons such as `0 > 0` are expected.
+#[allow(clippy::absurd_extreme_comparisons)]
+fn iterated_sha256_x86(input: &[u8], iterations: usize) -> [u8; 32] {
+    let data = load_block(input);
 
     let mut msg = [
         to_m128i(data[0], data[1], data[2], data[3]),
@@ -99,36 +135,33 @@ unsafe fn iterated_sha256_x86(input: &[u8], iterations: usize) -> [u8; 32] {
         }
     }
 
-    let msg0 = u32x4::from(msg[0]);
-    let msg1 = u32x4::from(msg[1]);
-
     let mut words = [0u32; 8];
-    msg0.copy_to_slice(&mut words[..4]);
-    msg1.copy_to_slice(&mut words[4..]);
+    // SAFETY: each store writes four words within `words`.
+    unsafe {
+        _mm_storeu_si128(words[0..4].as_mut_ptr().cast(), msg[0]);
+        _mm_storeu_si128(words[4..8].as_mut_ptr().cast(), msg[1]);
+    }
 
-    BigEndian::write_u32_into(&words, &mut digest);
-
-    digest
+    store_digest(&words)
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe fn iterated_sha256_aarch64(input: &[u8], iterations: usize) -> [u8; 32] {
-    let mut digest = [0u8; 32];
+#[target_feature(enable = "sha2,neon")]
+fn iterated_sha256_aarch64(input: &[u8], iterations: usize) -> [u8; 32] {
+    let data = load_block(input);
 
-    let mut data = [0u32; 16];
-    BigEndian::read_u32_into(input, &mut data[..8]);
-    data[8] = 0x8000_0000;
-    data[15] = 0x100;
+    // SAFETY: each load reads four words within `data` or `H`.
+    let mut msg = unsafe {
+        [
+            vld1q_u32(data[0..4].as_ptr()),
+            vld1q_u32(data[4..8].as_ptr()),
+            vld1q_u32(data[8..12].as_ptr()),
+            vld1q_u32(data[12..16].as_ptr()),
+        ]
+    };
 
-    let mut msg = [
-        vld1q_u32(data[0..3].as_ptr()),
-        vld1q_u32(data[4..7].as_ptr()),
-        vld1q_u32(data[8..11].as_ptr()),
-        vld1q_u32(data[12..15].as_ptr()),
-    ];
-
-    let state0 = vld1q_u32(H[0..3].as_ptr());
-    let state1 = vld1q_u32(H[4..7].as_ptr());
+    let state0 = unsafe { vld1q_u32(H[0..4].as_ptr()) };
+    let state1 = unsafe { vld1q_u32(H[4..8].as_ptr()) };
 
     let abef_save = state0;
     let cdgh_save = state1;
@@ -146,7 +179,9 @@ unsafe fn iterated_sha256_aarch64(input: &[u8], iterations: usize) -> [u8; 32] {
             for i in 0..16 {
                 let m = i % 4;
                 let m_next = (i + 1) % 4;
-                let tmp = vaddq_u32(msg[m], vld1q_u32(K[i*4..i*4+3].as_ptr()));
+                // SAFETY: reads four words within `K`.
+                let k = unsafe { vld1q_u32(K[i*4..i*4+4].as_ptr()) };
+                let tmp = vaddq_u32(msg[m], k);
                 msg[m] = vsha256su0q_u32(msg[m], msg[m_next]);
                 let old_state0 = state0;
                 state0 = vsha256hq_u32(state0, state1, tmp);
@@ -159,67 +194,138 @@ unsafe fn iterated_sha256_aarch64(input: &[u8], iterations: usize) -> [u8; 32] {
         msg[1] = vaddq_u32(state1, cdgh_save);
     }
 
-    let msg0 = u32x4::from(msg[0]);
-    let msg1 = u32x4::from(msg[1]);
-
     let mut words = [0u32; 8];
-    msg0.copy_to_slice(&mut words[..4]);
-    msg1.copy_to_slice(&mut words[4..]);
+    // SAFETY: each store writes four words within `words`.
+    unsafe {
+        vst1q_u32(words[0..4].as_mut_ptr(), msg[0]);
+        vst1q_u32(words[4..8].as_mut_ptr(), msg[1]);
+    }
 
-    BigEndian::write_u32_into(&words, &mut digest);
-    digest
+    store_digest(&words)
 }
 
-pub unsafe fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
+fn iterated_sha256_fallback(input: &[u8], iterations: usize) -> [u8; 32] {
+    use core::slice;
+    use sha2::block_api::compress256;
+
+    let mut block = [0u8; 64];
+    block[..32].copy_from_slice(input);
+    block[32] = 0x80;
+    block[62] = 0x01;
+
+    for _ in 0..iterations {
+        let mut state = H;
+        compress256(&mut state, slice::from_ref(&block));
+        block[..32].copy_from_slice(&store_digest(&state));
+    }
+    block[..32].try_into().unwrap()
+}
+
+/// Computes `iterations` iterations of SHA-256 for a 256-bit input, using hardware acceleration if
+/// available.
+///
+/// # Panics
+///
+/// Panics if `input` is not 32 bytes long.
+pub fn iterated_sha256(input: &[u8], iterations: usize) -> [u8; 32] {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if is_x86_feature_detected!("sha")
-            && is_x86_feature_detected!("sse2")
-            && is_x86_feature_detected!("ssse3")
-            && is_x86_feature_detected!("sse4.1")
-        {
-            return iterated_sha256_x86(input, iterations);
+        if has_x86_sha() {
+            // SAFETY: the required CPU features were detected above.
+            return unsafe { iterated_sha256_x86(input, iterations) };
         }
     }
 
-    #[cfg(all(target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     {
-        use std::arch::is_aarch64_feature_detected;
-        if is_aarch64_feature_detected!("sha2") && is_aarch64_feature_detected!("neon") {
-            return iterated_sha256_aarch64(input, iterations);
+        if has_aarch64_sha() {
+            // SAFETY: the required CPU features were detected above.
+            return unsafe { iterated_sha256_aarch64(input, iterations) };
         }
     }
 
-    {
-        use core::slice;
-        use sha2::{
-            compress256,
-            digest::generic_array::{typenum::U64, GenericArray},
-        };
-
-        let mut data: GenericArray<u8, U64> = GenericArray::default();
-        data[..32].copy_from_slice(input);
-        data[32] = 0x80;
-        data[62] = 0x01;
-
-        for _ in 0..iterations {
-            let mut state = H;
-            compress256(&mut state, slice::from_ref(&data));
-            BigEndian::write_u32_into(&state, &mut data[..32]);
-        }
-        let mut digest = [0u8; 32];
-        digest.copy_from_slice(&data[..32]);
-        digest
-    }
+    iterated_sha256_fallback(input, iterations)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
 
-    extern crate hex;
-    extern crate test;
-    use self::test::Bencher;
-    use super::iterated_sha256;
+    /// Checks each hardware backend available on this machine against the portable fallback, so
+    /// that a broken backend is caught even when the dispatcher would not select it by default.
+    #[test]
+    fn test_backends_match_fallback() {
+        let mut buffer = [0u8; 32];
+        buffer.copy_from_slice(
+            &hex::decode("00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58")
+                .unwrap(),
+        );
+        assert_eq!(
+            hex::encode(iterated_sha256_fallback(&buffer, 2)),
+            "10220216300ab35b89a72f8fee8c998b4aeec7ef25379864d7f0e5fbfa9e7a32"
+        );
+        for &iterations in &[0, 1, 2, 3, 1000] {
+            #[allow(unused_variables)]
+            let expected = iterated_sha256_fallback(&buffer, iterations);
+
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if has_x86_sha() {
+                    let actual = unsafe { iterated_sha256_x86(&buffer, iterations) };
+                    assert_eq!(actual, expected, "x86, iterations={}", iterations);
+                }
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                if has_aarch64_sha() {
+                    let actual = unsafe { iterated_sha256_aarch64(&buffer, iterations) };
+                    assert_eq!(actual, expected, "aarch64, iterations={}", iterations);
+                }
+            }
+        }
+    }
+
+    fn time(name: &str, iterations: usize, f: impl FnOnce() -> [u8; 32]) {
+        let start = Instant::now();
+        black_box(f());
+        let ns = start.elapsed().as_nanos() as f64 / iterations as f64;
+        println!("{name}: {ns:.2} ns/iteration");
+    }
+
+    /// Times each backend available on this machine.
+    ///
+    /// Run with `cargo test --release -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_backends() {
+        let buffer = [0u8; 32];
+        let iterations = 1 << 24;
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if has_x86_sha() {
+                time("x86", iterations, || unsafe {
+                    iterated_sha256_x86(black_box(&buffer), iterations)
+                });
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if has_aarch64_sha() {
+                time("aarch64", iterations, || unsafe {
+                    iterated_sha256_aarch64(black_box(&buffer), iterations)
+                });
+            }
+        }
+
+        time("fallback", iterations, || {
+            iterated_sha256_fallback(black_box(&buffer), iterations)
+        });
+    }
 
     #[test]
     fn test_iterated_sha256() {
@@ -228,29 +334,15 @@ mod tests {
             &hex::decode("00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58")
                 .unwrap(),
         );
-        unsafe {
-            let one_iteration = iterated_sha256(&buffer, 1);
-            assert_eq!(
-                hex::encode(&one_iteration),
-                "6b0ae522ab1c83ab6d75dad82bb5369840d48ad1b2b245284ab1bcf00135e458"
-            );
-            let two_iterations = iterated_sha256(&buffer, 2);
-            assert_eq!(
-                hex::encode(&two_iterations),
-                "10220216300ab35b89a72f8fee8c998b4aeec7ef25379864d7f0e5fbfa9e7a32"
-            );
-        }
-    }
-
-    #[bench]
-    fn bench_iterated_sha256(b: &mut Bencher) {
-        let mut buffer = [0u8; 32];
-        buffer.copy_from_slice(
-            &hex::decode("00000000000000000034b33e842ac1c50456abe5fa92b60f6b3dfc5d247f7b58")
-                .unwrap(),
+        let one_iteration = iterated_sha256(&buffer, 1);
+        assert_eq!(
+            hex::encode(one_iteration),
+            "6b0ae522ab1c83ab6d75dad82bb5369840d48ad1b2b245284ab1bcf00135e458"
         );
-        unsafe {
-            b.iter(|| iterated_sha256(&buffer, 1 << 12));
-        }
+        let two_iterations = iterated_sha256(&buffer, 2);
+        assert_eq!(
+            hex::encode(two_iterations),
+            "10220216300ab35b89a72f8fee8c998b4aeec7ef25379864d7f0e5fbfa9e7a32"
+        );
     }
 }

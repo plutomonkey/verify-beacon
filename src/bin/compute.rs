@@ -2,9 +2,6 @@
 /// characters).
 ///
 /// Usage: `cargo run --release --bin compute < hex.txt`
-extern crate hex;
-extern crate verify_beacon;
-
 use std::io::{self, BufRead};
 use verify_beacon::sha256;
 
@@ -14,10 +11,10 @@ fn main() {
     let count = 1024;
     let iterations = (1 << 42) / count;
     let mut seed = decode_hex(handle.lines().next().unwrap());
-    println!("{}", hex::encode(&seed));
+    println!("{}", hex::encode(seed));
     for _ in 0..count {
-        let next = unsafe { sha256::iterated_sha256(&seed, iterations) };
-        println!("{}", hex::encode(&next));
+        let next = sha256::iterated_sha256(&seed, iterations);
+        println!("{}", hex::encode(next));
         seed = next;
     }
 }

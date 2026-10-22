@@ -1,15 +1,14 @@
 [package]
 name = "verify-beacon"
 version = "0.1.2"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 authors = ["Jason Davies <jason@jasondavies.com>"]
 description = "Computes and verifies an iterated SHA-256 randomness beacon using hardware acceleration if available."
 license = "MIT"
 
 [dependencies]
-byteorder = "1"
-crunchy = "0.2"
-sha2 = { version = "0.10", features = ["compress"] }
-itertools = "0.12.1"
-hex = "0.4.2"
-rayon = "1"
+crunchy = "0.2.4"
+sha2 = { version = "0.11.1", default-features = false }
+hex = "0.4.3"
+rayon = "1.12"

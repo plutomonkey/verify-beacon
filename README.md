@@ -17,14 +17,23 @@ Ryzen) and ARMv8 cryptographic extensions are supported.
 Usage
 -----
 
-* `cargo run --release --bin compute > pairs.txt`
+Requires Rust 1.88 or later (stable).
+
+* `cargo run --release --bin compute < seed.txt > pairs.txt`, where `seed.txt`
+  contains the 256-bit starting hash, hex-encoded.
 * `cargo run --release --bin verify < pairs.txt`
+
+The verifier prints the start and end hashes of the chain; compare these
+against the published seed and beacon values.
 
 Benchmarks
 ----------
 
 The time taken is around 130 cycles per iteration on AMD Ryzen, which is ~1h45m
-to verify on on 24 cores running at 3.8GHz.
+to verify on 24 cores running at 3.8GHz.
+
+Run `cargo test --release -- --ignored --nocapture` to time each available
+implementation on the current machine.
 
 [beacon]: https://lists.z.cash.foundation/pipermail/zapps-wg/2018/000267.html
 [ceremony]: https://z.cash.foundation/blog/powers-of-tau/
